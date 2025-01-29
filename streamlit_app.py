@@ -1,146 +1,77 @@
 import streamlit as st
 import google.generativeai as genai
-from jira import JIRA
-import smtplib
+import requests
 import json
 import re
-from email.mime.text import MIMEText
+from requests.auth import HTTPBasicAuth
 
-# 🔹 Configure Google API Key
+# Configure API Key securely from Streamlit's secrets
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
-# 🔹 Jira Credentials (Stored Securely in Streamlit Secrets)
-JIRA_SERVER = "https://evertechnologies.atlassian.net"
+# Jira Configuration
+JIRA_BASE_URL = "https://evertechnologies.atlassian.net/rest/api/3/"
 JIRA_EMAIL = st.secrets["JIRA_EMAIL"]
 JIRA_API_TOKEN = st.secrets["JIRA_API_TOKEN"]
-JIRA_PROJECT = "YOUR_PROJECT_KEY"
-DEFAULT_ASSIGNEE = "responsible_person@example.com"
+JIRA_PROJECT_KEY = "YOUR_PROJECT_KEY"
 
-# 🔹 SMTP Email Configuration (For Notifications)
-SMTP_SERVER = "smtp.example.com"
-SMTP_PORT = 587
-SMTP_USERNAME = st.secrets["SMTP_USERNAME"]
-SMTP_PASSWORD = st.secrets["SMTP_PASSWORD"]
-EMAIL_FROM = "notifications@evertechnologies.com"
-EMAIL_TO = "team@evertechnologies.com"
+# Streamlit UI
+st.set_page_config(page_title="Jira Ticket Analyzer", page_icon="📌", layout="wide")
+st.title("Jira Ticket Analyzer")
+st.write("Analyze Jira tickets and automatically post insights.")
 
-# 🔹 Connect to Jira API
-jira_options = {"server": JIRA_SERVER}
-jira = JIRA(options=jira_options, basic_auth=(JIRA_EMAIL, JIRA_API_TOKEN))
-
-# 🔹 Function to Fetch Latest Open Jira Ticket
-def get_latest_ticket():
-    query = f'project="{JIRA_PROJECT}" AND status="Open" ORDER BY created DESC'
-    issues = jira.search_issues(query, maxResults=1)
-    return issues[0] if issues else None
-
-# 🔹 AI Analysis Function (Using Google Gemini AI)
-@st.cache_data(ttl=3600)
-def analyze_ticket(description):
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    prompt = """Analyze this email and extract:
-    - Summary
-    - Sentiment (Positive, Neutral, Negative)
-    - Root Cause
-    - Actionable Steps
-    - Severity Level (High, Medium, Low)
-    - Responsible Person (if identifiable)
+# Fetch the latest Jira ticket
+def get_latest_jira_ticket():
+    url = f"{JIRA_BASE_URL}search?jql=project={JIRA_PROJECT_KEY}&orderBy=created DESC&maxResults=1"
+    headers = {"Accept": "application/json"}
+    response = requests.get(url, headers=headers, auth=HTTPBasicAuth(JIRA_EMAIL, JIRA_API_TOKEN))
     
-    Text:\n\n"""
-    response = model.generate_content(prompt + description[:1000])
-    return response.text.strip()
-
-# 🔹 Function to Detect Severity Level
-def detect_severity(text):
-    if "urgent" in text.lower() or "critical" in text.lower():
-        return "High"
-    elif "issue" in text.lower() or "problem" in text.lower():
-        return "Medium"
-    return "Low"
-
-# 🔹 Function to Assign Ticket to Responsible Person
-def assign_ticket(ticket_id, assignee_email):
-    try:
-        user = jira.search_users(assignee_email)
-        if user:
-            jira.assign_issue(ticket_id, user[0].accountId)
-            return f"Issue assigned to {assignee_email}"
-        else:
-            return "No valid user found for assignment"
-    except Exception as e:
-        return f"Assignment Error: {e}"
-
-# 🔹 Function to Post Comment on Jira Ticket
-def comment_on_ticket(ticket_id, analysis, severity):
-    comment_text = f"🔍 **Automated Analysis:**\n{analysis}\n\n🚨 **Severity Level:** {severity}"
-    jira.add_comment(ticket_id, comment_text)
-
-# 🔹 Function to Send Email Notification
-def send_email_notification(ticket_id, summary, severity, assignee):
-    subject = f"[Jira Alert] New Ticket Analyzed - {ticket_id} ({severity})"
-    body = f"""
-    A new Jira ticket has been analyzed:
-
-    🔹 **Ticket ID:** {ticket_id}
-    🔹 **Summary:** {summary}
-    🔹 **Severity Level:** {severity}
-    🔹 **Assigned To:** {assignee}
-
-    Check the ticket here: {JIRA_SERVER}/browse/{ticket_id}
-
-    - Automated Escalytics System
-    """
-
-    msg = MIMEText(body)
-    msg["From"] = EMAIL_FROM
-    msg["To"] = EMAIL_TO
-    msg["Subject"] = subject
-
-    try:
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(SMTP_USERNAME, SMTP_PASSWORD)
-        server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
-        server.quit()
-        return "Email notification sent!"
-    except Exception as e:
-        return f"Email Error: {e}"
-
-# 🔹 Streamlit UI
-st.set_page_config(page_title="Escalytics", page_icon="📧", layout="wide")
-st.title("⚡ Jira Email Analyzer & Automator")
-
-if st.button("Analyze Latest Jira Ticket"):
-    ticket = get_latest_ticket()
+    if response.status_code == 200:
+        issues = response.json().get("issues", [])
+        if issues:
+            return issues[0]
     
-    if ticket:
-        ticket_id = ticket.key
-        ticket_summary = ticket.fields.summary
-        ticket_description = ticket.fields.description
+    st.error("Failed to fetch Jira ticket.")
+    return None
 
-        st.write(f"Analyzing Ticket: **{ticket_id} - {ticket_summary}**")
-        
-        # 🧠 Run AI Analysis
-        analysis = analyze_ticket(ticket_description)
-        
-        # 🏷️ Detect Severity
-        severity = detect_severity(ticket_description)
-        
-        # 👤 Assign Ticket
-        assignment_status = assign_ticket(ticket_id, DEFAULT_ASSIGNEE)
+# AI Analysis Function
+def analyze_ticket(summary, description):
+    prompt = (f"Analyze the following Jira ticket and provide insights:\n"
+              f"Summary: {summary}\n"
+              f"Description: {description}\n"
+              f"Provide sentiment, key highlights, severity, risk assessment, root cause, and suggested actions.")
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        st.error(f"AI Analysis Error: {e}")
+        return ""
 
-        # 📝 Post Comment on Jira
-        comment_on_ticket(ticket_id, analysis, severity)
-
-        # 📧 Send Email Notification
-        email_status = send_email_notification(ticket_id, ticket_summary, severity, DEFAULT_ASSIGNEE)
-
-        # ✅ Show Results
-        st.success(f"Analysis posted as a comment on Jira ticket **{ticket_id}**!")
-        st.text_area("Analysis Result:", analysis, height=200)
-        st.write(f"🚨 **Severity Level:** {severity}")
-        st.write(f"👤 **Assignment Status:** {assignment_status}")
-        st.write(f"📩 **Email Notification:** {email_status}")
-
+# Post Comment to Jira Ticket
+def post_comment_to_jira(ticket_id, comment):
+    url = f"{JIRA_BASE_URL}issue/{ticket_id}/comment"
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    data = json.dumps({"body": comment})
+    response = requests.post(url, headers=headers, auth=HTTPBasicAuth(JIRA_EMAIL, JIRA_API_TOKEN), data=data)
+    
+    if response.status_code == 201:
+        st.success("Analysis posted as a comment on Jira ticket.")
     else:
-        st.warning("No new open tickets found.")
+        st.error("Failed to post comment on Jira ticket.")
+
+# Main Execution
+latest_ticket = get_latest_jira_ticket()
+if latest_ticket:
+    ticket_id = latest_ticket["key"]
+    summary = latest_ticket["fields"].get("summary", "No summary available")
+    description = latest_ticket["fields"].get("description", {}).get("content", "No description available")
+    
+    st.subheader(f"Latest Ticket: {ticket_id}")
+    st.write(f"**Summary:** {summary}")
+    st.write(f"**Description:** {description}")
+    
+    if st.button("Analyze Ticket"):
+        analysis = analyze_ticket(summary, description)
+        st.subheader("Analysis Result")
+        st.write(analysis)
+        post_comment_to_jira(ticket_id, analysis)
